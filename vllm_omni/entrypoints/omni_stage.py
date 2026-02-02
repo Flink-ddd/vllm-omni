@@ -432,14 +432,20 @@ class OmniStage:
             return self._out_q.get_nowait()
         except Exception:
             return None
-        
+
     def sleep(self, level: int = 1):
-        if hasattr(self.engine, OmniStageTaskType.SLEEP.value):
-            self.engine.sleep(level=level)
+        if self.engine is not None:
+            if hasattr(self.engine, "sleep"):
+                self.engine.sleep(level=level)
+        elif self._in_q is not None:
+            self.submit({"type": OmniStageTaskType.SLEEP, "level": level})
 
     def wake_up(self):
-        if hasattr(self.engine, OmniStageTaskType.WAKE_UP.value):
-            self.engine.wake_up()
+        if self.engine is not None:
+            if hasattr(self.engine, "wake_up"):
+                self.engine.wake_up()
+        elif self._in_q is not None:
+            self.submit({"type": OmniStageTaskType.WAKE_UP})
 
     def process_engine_inputs(
         self, stage_list: list[Any], prompt: OmniTokensPrompt | TextPrompt = None
@@ -786,6 +792,19 @@ def _stage_worker(
         if task_type == OmniStageTaskType.SHUTDOWN:
             logger.info("Received shutdown signal")
             break
+
+        if task_type == OmniStageTaskType.SLEEP:
+            level = task.get("level", 1)
+            if hasattr(stage_engine, "sleep"):
+                logger.info(f"[Stage-{stage_id}] Executing real sleep(level={level})")
+                stage_engine.sleep(level=level)
+            continue
+
+        if task_type == OmniStageTaskType.WAKE_UP:
+            if hasattr(stage_engine, "wake_up"):
+                logger.info(f"[Stage-{stage_id}] Execuring real wake_up()")
+                stage_engine.wake_up()
+            continue
 
         # Handle profiler control commands
         if is_profiler_task(task_type):
@@ -1423,6 +1442,17 @@ async def _stage_worker_async(
                 logger.debug("Received shutdown signal")
                 stage_engine.shutdown()
                 break
+            elif task_type == OmniStageTaskType.SLEEP:
+                level = task.get("level", 1)
+                if hasattr(stage_engine, "sleep"):
+                    logger.info(f"[Stage-{stage_id}] Async Worker executing sleep(level={level})")
+                    stage_engine.sleep(level=level)
+                continue
+            elif task_type == OmniStageTaskType.WAKE_UP:
+                if hasattr(stage_engine, "wake_up"):
+                    logger.info(f"[Stage-{stage_id}] Async Worker executing wake_up()")
+                    stage_engine.wake_up()
+                continue
             elif task_type == OmniStageTaskType.ABORT:
                 rid = task["request_id"]
                 asyncio.create_task(stage_engine.abort(rid))
