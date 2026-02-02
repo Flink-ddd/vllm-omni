@@ -618,6 +618,14 @@ class Omni(OmniBase):
             # Cleanup when generator is exhausted or closed
             self.close()
 
+    def sleep(self, level: int = 1):
+        for stage in self.stage_list:
+            stage.sleep(level=level)
+
+    def wake_up(self):
+        for stage in self.stage_list:
+            stage.wake_up()
+
     def _run_generation(
         self,
         prompts: OmniPromptType | Sequence[OmniPromptType],

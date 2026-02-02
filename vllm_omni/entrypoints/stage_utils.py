@@ -18,6 +18,8 @@ class OmniStageTaskType(enum.Enum):
     SHUTDOWN = "shutdown"
     PROFILER_START = "profiler_start"
     PROFILER_STOP = "profiler_stop"
+    SLEEP = "sleep"
+    WAKE_UP = "wake_up"
 
 
 SHUTDOWN_TASK = {"type": OmniStageTaskType.SHUTDOWN}

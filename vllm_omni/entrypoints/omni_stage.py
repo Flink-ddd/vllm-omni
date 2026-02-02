@@ -432,6 +432,14 @@ class OmniStage:
             return self._out_q.get_nowait()
         except Exception:
             return None
+        
+    def sleep(self, level: int = 1):
+        if hasattr(self.engine, OmniStageTaskType.SLEEP.value):
+            self.engine.sleep(level=level)
+
+    def wake_up(self):
+        if hasattr(self.engine, OmniStageTaskType.WAKE_UP.value):
+            self.engine.wake_up()
 
     def process_engine_inputs(
         self, stage_list: list[Any], prompt: OmniTokensPrompt | TextPrompt = None
