@@ -4,6 +4,7 @@
 # and vllm_omni.entrypoints.omni_llm.py
 
 import time
+import asyncio
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,23 @@ def try_send_via_connector(
     sending notification, and recording metrics.
     """
     try:
+
+        #Automatic wake-up protection logic
+        # Get an Orchestrator instance
+        # Note: In the AsyncOmni architecture, 
+        # the Orchestrator is responsible for managing the stage_list
+        from vllm_omni.entrypoints.omni import OmniBase
+        orchestrator = OmniBase.get_instance()
+        if orchestrator and next_stage_id < len(orchestrator.stage_list):
+            target_stage = orchestrator.stage_list[next_stage_id]
+            # If the target phase is sleeping, initiate a non-blocking wake-up.
+            if hasattr(target_stage, "status") and target_stage.status == "SLEEPING":
+                logger.info(f"[Connector] Target Stage-{next_stage_id} is SLEEPING. "
+                            f"Triggering auto-wake for req {req_id}...")
+                target_stage.update_status("TRANSITIONING")
+                if hasattr(target_stage, "engine") and target_stage.engine:
+                    asyncio.create_task(target_stage.engine.wake_up())
+
         t0 = time.time()
 
         # Prepare data for connector

@@ -22,6 +22,9 @@ from vllm.v1.worker.workspace import init_workspace_manager
 from vllm_omni.diffusion.data import (
     DiffusionOutput,
     OmniDiffusionConfig,
+    OmniACK,
+    OmniSleepTask,
+    OmniWakeTask,
 )
 from vllm_omni.diffusion.distributed.parallel_state import (
     destroy_distributed_env,
@@ -191,6 +194,10 @@ class DiffusionWorker:
 
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+
+        current_omni_platform.empty_cache()
+        current_omni_platform.synchronize()
+
         free_bytes_after_sleep = current_omni_platform.get_free_memory()
         device_id = self.device.index if self.device.index is not None else 0
         total = current_omni_platform.get_device_total_memory(device_id)
@@ -199,6 +206,7 @@ class DiffusionWorker:
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
             "Sleep mode freed %.2f GiB memory, %.2f GiB memory is still in use.",
+            current_omni_platform.device_type,
             freed_bytes / GiB_bytes,
             used_bytes / GiB_bytes,
         )
@@ -229,6 +237,59 @@ class DiffusionWorker:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
         return True
+
+    def handle_sleep_task(self, task: OmniSleepTask) -> None:
+        """
+        Deterministic Sleep Processor:
+        1. Perform physical garbage collection
+        2. Destroy CUDA Graph memory
+        3. Emitter a physical acknowledgment (ACK) signal
+        """
+        try:
+            initial_reserved = torch.cuda.memory_reserved()
+            logger.info(f"[Worker {self.rank}] Handshake Received: Task {task.task_id}, Level {task.level}")
+
+            if task.level >= 2:
+                if hasattr(self.model_runner, "graph_runners"):
+                    self.model_runner.graph_runners.clear()
+                    logger.info(f"[Worker {self.rank}] Task 1: CUDA Graph runners cleared.")
+
+                self.sleep(level=task.level)
+
+            freed = initial_reserved - current_omni_platform.get_memory_reserved()
+            ack = OmniACK(
+                task_id=task.task_id,
+                status="SUCCESS",
+                stage_id=getattr(self, "stage_id", 0),
+                rank=self.rank,
+                freed_bytes=freed,
+                metadata={"cuda_graph_cleaned": task.level >= 2}
+            )
+            self.result_mq.put(ack)
+            logger.info(f"[Worker {self.rank}] Task 2: ACK emitted. Freed {freed / 1024**3:.2f} GiB.")
+
+        except Exception as e:
+            logger.error(f"[Worker {self.rank}] Task 2 Failed: {e}", exc_info=True)
+            self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
+
+    def handle_wake_task(self, task: OmniWakeTask) -> None:
+        """Deterministic wake-up processor"""
+        try:
+            logger.info(f"[Worker {self.rank}] Responding to Wake-up Task: {task.task_id}")
+            self.wake_up(tags=task.tags)
+            current_omni_platform.synchronize()
+
+            # send WARM ACK
+            ack = OmniACK(
+                task_id=task.task_id,
+                status="SUCCESS",
+                metadata={"state": "WARM", "rank": self.rank}
+            )
+            self.result_mq.put(ack)
+            logger.info(f"[Worker {self.rank}] Task 2: Wake-up confirmed.")
+        except Exception as e:
+            self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
+
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         """Get memory pool context for sleep mode support."""

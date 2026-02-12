@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import uuid
+import asyncio
 import time
 from collections.abc import Iterable
 from typing import Any
@@ -9,7 +11,12 @@ from typing import Any
 import PIL.Image
 from vllm.logger import init_logger
 
-from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import (
+    OmniDiffusionConfig,
+    OmniACK,
+    OmniSleepTask,
+    OmniWakeTask
+    )
 from vllm_omni.diffusion.executor.abstract import DiffusionExecutor
 from vllm_omni.diffusion.registry import (
     DiffusionModelRegistry,
@@ -58,6 +65,8 @@ class DiffusionEngine:
 
         executor_class = DiffusionExecutor.get_class(od_config)
         self.executor = executor_class(od_config)
+
+        self.orchestrator = None
 
         try:
             self._dummy_run()
@@ -375,3 +384,46 @@ class DiffusionEngine:
         # TODO implement it
         logger.warning("DiffusionEngine abort is not implemented yet")
         pass
+
+
+    async def sleep(self, level: int = 2) -> list[OmniACK]:
+        """
+        Deterministic Memory Reclamation Interface
+        Responsibilities: Initiate physical memory reclamation 
+        and wait for acknowledgments (ACKs) from all Workers.
+        """
+        if self.orchestrator is None or not hasattr(self.orchestrator, "resolver"):
+            logger.warning("Orchestrator resolver not found, falling back to basic sleep.")
+            return self.collective_rpc("handle_sleep_task", args=(OmniSleepTask("local", level),))
+
+        task_id = str(uuid.uuid4())
+
+        expected = self.executor.get_worker_count() if hasattr(self.executor, "get_worker_count") else 1
+        future = self.orchestrator.resolver.watch_task(task_id, expected_count=expected)
+        # Send RPC commands to all Workers
+        self.executor.send_rpc_request(
+            "handle_sleep_task", 
+            args=(OmniSleepTask(task_id=task_id, level=level),)
+        )
+        logger.info(f"[Engine] Sleep initiated. Task ID: {task_id}. Awaiting {expected} ACKs...")
+        # Blocking Suspension: The suspension will only be lifted upon receiving all ACKs or a timeout.
+        # Ensures that the video memory is truly physically released upon returning.
+        return await asyncio.wait_for(future, timeout=60.0)
+
+    async def wake_up(self, tags: list[str] | None = None) -> list[OmniACK]:
+        """Deterministic wake-up interface"""
+        if self.orchestrator is None or not hasattr(self.orchestrator, "resolver"):
+            return self.collective_rpc("handle_wake_task", args=(OmniWakeTask("local", tags),))
+
+        task_id = str(uuid.uuid4())
+
+        expected = self.executor.get_worker_count() if hasattr(self.executor, "get_worker_count") else 1
+        future = self.orchestrator.resolver.watch_task(task_id, expected_count=expected)
+
+        self.executor.send_rpc_request(
+            "handle_wake_task",
+            args=(OmniWakeTask(task_id=task_id, tags=tags),)
+        )
+
+        logger.info(f"[Engine] Wake-up initiated. Task ID: {task_id}. Awaiting {expected} ACKs...")
+        return await asyncio.wait_for(future, timeout=60.0)

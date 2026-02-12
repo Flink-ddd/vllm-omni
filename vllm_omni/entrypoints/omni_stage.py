@@ -281,6 +281,7 @@ class OmniStage:
         self._proc: mp.Process | None = None
         self._shm_threshold_bytes: int = 65536
         self._stage_init_timeout: int = stage_init_timeout
+        self.status = " RUNNING"
 
     def set_engine(self, engine: LLMEngine) -> None:
         """Set the LLM engine for this stage.
@@ -559,6 +560,29 @@ class OmniStage:
 
         self._in_q.put(payload)
 
+    def update_status(self, new_status: str):
+        """Atomized update phase state"""
+        self.status = new_status
+        logger.info(f"[Stage-{self.stage_id}] Status transitioned to: {new_status}")
+
+    def sleep(self, level: int = 2, task_id: str = "local"):
+        """Send sleep command to Worker"""
+        logger.info(f"[Stage-{self.stage_id}] Submitting SLEEP task (Level: {level})")
+        self.submit({
+            "type": OmniStageTaskType.SLEEP,
+            "level": level,
+            "task_id": task_id
+        })
+
+    def wake_up(self, tags: list[str] | None = None, task_id: str = "local"):
+        """Send wake-up command to Worker"""
+        logger.info(f"[Stage-{self.stage_id}] Submitting WAKE_UP task")
+        self.submit({
+            "type": OmniStageTaskType.WAKE_UP,
+            "tags": tags, 
+            "task_id": task_id
+        })
+
     def try_collect(self) -> dict[str, Any] | None:
         """Try to collect a result from the stage worker without blocking.
 
@@ -775,6 +799,23 @@ def _stage_worker(
         if task_type == OmniStageTaskType.SHUTDOWN:
             logger.info("Received shutdown signal")
             break
+
+        if task_type == OmniStageTaskType.SLEEP:
+            if hasattr(stage_engine, "handle_sleep_task"):
+                from vllm_omni.diffusion.data import OmniSleepTask
+                stage_engine.handle_sleep_task(OmniSleepTask(
+                    task_id=task.get("task_id", "local"),
+                    level=task.get("level", 2)
+                ))
+            continue
+        if task_type == OmniStageTaskType.WAKE_UP:
+            if hasattr(stage_engine, "handle_wake_task"):
+                from vllm_omni.diffusion.data import OmniWakeTask
+                stage_engine.handle_wake_task(OmniWakeTask(
+                    task_id=task.get("task_id", "local"),
+                    tags=task.get("tags")
+                ))
+            continue
 
         # Handle profiler control commands
         if is_profiler_task(task_type):
@@ -1272,6 +1313,20 @@ async def _stage_worker_async(
             elif task_type == OmniStageTaskType.ABORT:
                 rid = task["request_id"]
                 asyncio.create_task(stage_engine.abort(rid))
+            elif task_type == OmniStageTaskType.SLEEP:
+                from vllm_omni.diffusion.data import OmniSleepTask
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, stage_engine.handle_sleep_task, OmniSleepTask(
+                    task_id=task.get("task_id", "local"),
+                    level=task.get("level", 2)
+                ))
+            elif task_type == OmniStageTaskType.WAKE_UP:
+                from vllm_omni.diffusion.data import OmniWakeTask
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(None, stage_engine.handle_wake_task, OmniWakeTask(
+                    task_id=task.get("task_id", "local"),
+                    tags=task.get("tags")
+                ))
             elif is_profiler_task(task_type):
                 await handle_profiler_task_async(task_type)
             else:

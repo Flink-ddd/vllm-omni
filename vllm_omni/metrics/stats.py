@@ -11,6 +11,8 @@ from vllm.logger import init_logger
 
 from vllm_omni.metrics.utils import _build_field_defs, _build_row, _format_table
 
+from vllm_omni.platforms import current_omni_platform
+
 logger = init_logger(__name__)
 
 
@@ -129,6 +131,7 @@ class OrchestratorAggregator:
             tuple[int, int, str], TransferEdgeStats
         ] = {}  # Key: (from_stage, to_stage, request_id)
         self.e2e_events: list[RequestE2EStats] = []
+        self.total_reclaimed_vram = 0
 
     def init_run_state(self, wall_start_ts: float) -> None:
         # Per-run aggregates and timing state
@@ -239,6 +242,19 @@ class OrchestratorAggregator:
                     request_id,
                     stage_id,
                 )
+
+    def record_vram_reclamation(self, freed_bytes: int) -> None:
+        try:
+            device_label = "ROCm/AMD" if current_omni_platform.is_rocm() else "CUDA/NVIDIA"
+            self.total_reclaimed_vram += int(freed_bytes)
+            logger.debug(
+                f"Metrics-{device_label}]"
+                f"[Metrics] Recorded VRAM reclamation: {freed_bytes / 1024**3:.2f} GiB. "
+                f"Total Reclaimed: {self.total_reclaimed_vram / 1024**3:.2f} GiB."
+            )
+        except Exception:
+            logger.warning("Failed to record VRAM reclamation: %s", freed_bytes)
+
 
     def _as_stage_request_stats(
         self,
@@ -410,6 +426,7 @@ class OrchestratorAggregator:
             "e2e_total_tokens": int(self.e2e_total_tokens),
             "e2e_avg_time_per_request_ms": float(e2e_avg_req),
             "e2e_avg_tokens_per_s": float(e2e_avg_tok),
+            "total_vram_reclaimed_gib": float(self.total_reclaimed_vram / (1024**3)),
         }
         # Add stage_wall_time_ms as separate fields for each stage
         for idx, wall_time in enumerate(stage_wall_time_ms):

@@ -195,3 +195,21 @@ class MultiprocDiffusionExecutor(DiffusionExecutor):
     def shutdown(self) -> None:
         self._closed = True
         self._finalizer()
+
+
+    def get_worker_count(self) -> int:
+        """Get the total number of Workers currently managed by the Executor."""
+        return self.od_config.num_gpus
+
+    def send_rpc_request(self, method: str, args: tuple = (), kwargs: dict | None = None) -> None:
+        """Core principle: Send instructions but do not preempt the result queue."""
+        if self._closed:
+            raise RuntimeError("Executor closed")
+        rpc_request = {
+            "type": "rpc",
+            "method": method,
+            "args": args,
+            "kwargs": kwargs or {},
+            "output_rank": None,
+        }
+        self.scheduler.mq.enqueue(rpc_request)

@@ -515,5 +515,38 @@ class AttentionBackendEnum(enum.Enum):
         return self.name.lower()
 
 
+@dataclass
+class OmniACK:
+    """
+    Handshake payload from Workers to Orchestrator.
+    """
+    task_id: str
+    status: str
+    stage_id: int | None = None
+    rank: int | None = None
+    freed_bytes: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """
+    Additional telemetry such as:
+    - max_contiguous_block: for fragmentation analysis.
+    - cuda_graph_recalled: boolean if graphs were successfully destroyed/rebuilt.
+    - latency_ms: time taken for the D2H/H2D transfer.
+    """
+    error_msg: str | None = None
+
+@dataclass
+class OmniSleepTask:
+    """Structured sleep instruction."""
+    task_id: str
+    level: int = 2
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class OmniWakeTask:
+    """Structured wake-up instruction."""
+    task_id: str
+    tags: list[str] | None = None
+
+
 # Special message broadcast via scheduler queues to signal worker shutdown.
 SHUTDOWN_MESSAGE = {"type": "shutdown"}

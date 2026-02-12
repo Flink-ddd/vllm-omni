@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import uuid
 import copy
 import time
 import weakref
@@ -16,7 +17,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from vllm_omni.config import OmniModelConfig
-from vllm_omni.diffusion.data import DiffusionParallelConfig
+from vllm_omni.diffusion.data import DiffusionParallelConfig, OmniACK
 from vllm_omni.distributed.omni_connectors.adapter import compute_talker_prompt_ids_length, try_send_via_connector
 from vllm_omni.distributed.ray_utils.utils import try_close_ray
 from vllm_omni.engine.input_processor import OmniInputProcessor
@@ -55,6 +56,45 @@ def _weak_close_cleanup_async(stage_list, stage_in_queues, ray_pg, output_handle
     # Cancel output handler
     if output_handler is not None:
         output_handler.cancel()
+
+class AsyncEventResolver:
+    """
+    Aggregation and distribution center for handling cross-process ACK signals in AsyncOmni. 
+    Maintains a mapping of request_id to asyncio.Event objects, 
+    allowing stage workers to signal completion of tasks back to the main AsyncOmni loop for coordination and scheduling decisions.
+    """
+    def __init__(self):
+        self._pending_tasks: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+    def watch_task(self, task_id:str, expected_count: int = 1) ->asyncio.Event:
+        """
+        Register a waiting task, specifying the number of Worker replies required.
+        """
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._pending_tasks[task_id] = {
+            "future": fut,
+            "expected_count": expected_count,
+            "current_count": 0
+        }
+        return fut
+    async def resolve(self, ack: OmniACK):
+        task_info = self._pending_tasks.get(ack.task_id)
+        if task_info is None:
+            logger.warning(f"Received ACK for unknown task_id {ack.task_id}")
+            return
+        task_info["received"] = task_info.get("received", [])
+        task_info["received"].append(ack)
+        # Once an ACK is received, 
+        # the data in the video memory is recorded into the indicator database.
+        if hasattr(self,"orchestrator") and self.orchestrator.metrics:
+            self.orchestrator.metrics.record_vram_reclaimed(ack.freed_bytes)
+        # The Future is only awakened after all Workers' ACKs have been received.
+        if len (task_info["received"]) >= task_info["expected"]:
+                self._pending_tasks.pop(ack.task_id)
+                fut = task_info["future"]
+                if not fut.done():
+                    fut.set_result(task_info["received"])
 
 
 class AsyncOmni(OmniBase):
@@ -98,9 +138,16 @@ class AsyncOmni(OmniBase):
 
         # Request state tracking
         self.request_states: dict[str, ClientRequestState] = {}
+        #Initialize the deterministic handshake parser
+        self.event_resolver = AsyncEventResolver()
         self.output_handler: asyncio.Task | None = None
 
         super().__init__(model, **kwargs)
+
+        for stage in self.stage_list:
+            if hasattr(stage, "engine") and stage.engine is not None:
+                stage.engine.orchestrator = self 
+                logger.debug(f"[{self._name}] Injected orchestrator into Stage-{stage.stage_id} engine.")
 
         # Register weak reference cleanup (called on garbage collection)
         self._weak_finalizer = weakref.finalize(
@@ -570,6 +617,11 @@ class AsyncOmni(OmniBase):
                         if result is None:
                             continue
                         idle = False
+                        #Intercept and parse the ACK signal
+                        if isinstance(result, OmniACK):
+                            logger.debug(f"[{self._name}] Received ACK for task {result.task_id} from stage-{stage_id}")
+                            await self.event_resolver.resolve(result)
+                            continue
                         if result.get("type") == "stage_ready":
                             # Only happens when stage is initialized slower than expected,
                             # so we wait for a short time and try again
@@ -794,3 +846,33 @@ class AsyncOmni(OmniBase):
 
         async with self._pause_cond:
             return self._paused
+        
+    async def sleep(self, stage_ids: list[int] | None = None, level:int = 2) -> list[OmniACK]:
+        """
+        Directed phase control + deterministic waiting
+        """
+        if stage_ids is None:
+            stage_ids = list(range(len(self.stage_list)))
+        total_workers = sum(len(self.stage_list[stage_id].workers) for stage_id in stage_ids)
+        task_id = str(uuid.uuid4())
+        future = self.resolver.watch_task(task_id, expected_count=total_workers)
+        for stage_id in stage_ids:
+            stage = self.stage_list[stage_id]
+            stage.update_status("TRANSITIONING")
+            stage.sleep(level=level, task_id=task_id)
+        logger.info(f"[{self._name}] Sleep initiated. Awaiting confirmation from {total_workers} workers...")
+        return await asyncio.wait_for(future, timeout=300)
+    
+    async def wake_up(self, stage_ids: list[int] | None = None, tags: list[str] | None = None) -> list[OmniACK]:
+        """
+        Directed phase control + deterministic waiting
+        """
+        if stage_ids is None:
+            stage_ids = list(range(len(self.stage_list)))
+        total_workers = sum(len(self.stage_list[stage_id].workers) for stage_id in stage_ids)
+        task_id = str(uuid.uuid4())
+        future = self.resolver.watch_task(task_id, expected_count=total_workers)
+        for stage_id in stage_ids:
+            self.stage_list[stage_id].wake_up(tags=tags, task_id=task_id)
+        logger.info(f"[{self._name}] Wake-up initiated. Awaiting confirmation from {total_workers} workers...")
+        return await asyncio.wait_for(future, timeout=300)
