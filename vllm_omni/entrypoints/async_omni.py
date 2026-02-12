@@ -83,14 +83,17 @@ class AsyncEventResolver:
         if task_info is None:
             logger.warning(f"Received ACK for unknown task_id {ack.task_id}")
             return
-        task_info["received"] = task_info.get("received", [])
+        if "received" not in task_info:
+            task_info["received"] = []
         task_info["received"].append(ack)
+
         # Once an ACK is received, 
         # the data in the video memory is recorded into the indicator database.
         if hasattr(self,"orchestrator") and self.orchestrator.metrics:
-            self.orchestrator.metrics.record_vram_reclaimed(ack.freed_bytes)
+            self.orchestrator.metrics.record_vram_reclaimed(getattr(ack, "freed_bytes", 0))
+
         # The Future is only awakened after all Workers' ACKs have been received.
-        if len (task_info["received"]) >= task_info["expected"]:
+        if len (task_info["received"]) >= task_info["expected_count"]:
                 self._pending_tasks.pop(ack.task_id)
                 fut = task_info["future"]
                 if not fut.done():
@@ -140,6 +143,7 @@ class AsyncOmni(OmniBase):
         self.request_states: dict[str, ClientRequestState] = {}
         #Initialize the deterministic handshake parser
         self.event_resolver = AsyncEventResolver()
+        self.event_resolver.orchestrator = self  # type: ignore[assignment]
         self.output_handler: asyncio.Task | None = None
 
         super().__init__(model, **kwargs)
@@ -853,9 +857,16 @@ class AsyncOmni(OmniBase):
         """
         if stage_ids is None:
             stage_ids = list(range(len(self.stage_list)))
-        total_workers = sum(len(self.stage_list[stage_id].workers) for stage_id in stage_ids)
+        total_workers = 0
+        for stage_id in stage_ids:
+            stage = self.stage_list[stage_id]
+            if stage.engine and stage.engine.executor:
+                total_workers += stage.engine.executor.get_worker_count()
+            else:
+                total_workers += 1
         task_id = str(uuid.uuid4())
-        future = self.resolver.watch_task(task_id, expected_count=total_workers)
+
+        future = self.event_resolver.watch_task(task_id, expected_count=total_workers)
         for stage_id in stage_ids:
             stage = self.stage_list[stage_id]
             stage.update_status("TRANSITIONING")
@@ -869,9 +880,16 @@ class AsyncOmni(OmniBase):
         """
         if stage_ids is None:
             stage_ids = list(range(len(self.stage_list)))
-        total_workers = sum(len(self.stage_list[stage_id].workers) for stage_id in stage_ids)
+        total_workers = 0
+        for stage_id in stage_ids:
+            stage = self.stage_list[stage_id]
+            if stage.engine and stage.engine.executor:
+                total_workers += stage.engine.executor.get_worker_count()
+            else:
+                total_workers += 1
         task_id = str(uuid.uuid4())
-        future = self.resolver.watch_task(task_id, expected_count=total_workers)
+
+        future = self.event_resolver.watch_task(task_id, expected_count=total_workers)
         for stage_id in stage_ids:
             self.stage_list[stage_id].wake_up(tags=tags, task_id=task_id)
         logger.info(f"[{self._name}] Wake-up initiated. Awaiting confirmation from {total_workers} workers...")
