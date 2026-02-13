@@ -220,12 +220,18 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
         # and adding the new omni-specific fields
         config_dict = base_config.__dict__.copy()
 
-        # Add the new omni-specific fields
+        if "multimodal_config" in config_dict:
+            mm = config_dict.pop("multimodal_config")
+            if mm and hasattr(mm, "__dict__"):
+                config_dict.update(mm.__dict__)
+
+        # 2. 补齐 Omni 核心字段
         config_dict["stage_id"] = self.stage_id
         config_dict["async_chunk"] = self.async_chunk
         config_dict["model_stage"] = self.model_stage
         config_dict["model_arch"] = self.model_arch
         config_dict["engine_output_type"] = self.engine_output_type
+        
         stage_connector_config = {
             "name": self.stage_connector_spec.get("name", "SharedMemoryConnector"),
             "extra": self.stage_connector_spec.get("extra", {}).copy(),
@@ -236,8 +242,18 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
         config_dict["hf_config_name"] = self.hf_config_name
         config_dict["custom_process_next_stage_input_func"] = self.custom_process_next_stage_input_func
         config_dict["omni_kv_config"] = self.omni_kv_config
-        config_dict["video_pruning_rate"] = self.video_pruning_rate
+
+        config_dict["video_pruning_rate"] = float(self.video_pruning_rate)
+        
         config_dict["skip_mm_profiling"] = True
+
+        if config_dict.get("mm_encoder_attn_backend") is False:
+            config_dict["mm_encoder_attn_backend"] = None
+        
+        current_tp = config_dict.get("mm_encoder_tp_mode")
+        if current_tp not in ["weights", "data"]:
+            config_dict["mm_encoder_tp_mode"] = "weights"
+
         omni_config = OmniModelConfig(**config_dict)
         omni_config.hf_config.architectures = omni_config.architectures
 

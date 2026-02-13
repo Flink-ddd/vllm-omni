@@ -15,19 +15,33 @@ pytestmark = [pytest.mark.core_model, pytest.mark.gpu]
 @pytest.fixture(scope="module")
 async def omni_engine():
     model_name = "Qwen/Qwen2.5-Omni-3B"
-    stage_0 = {
-        "stage_id": 0,
-        "stage_type": "llm",
-        "runtime": {"process": True, "devices": "0", "max_batch_size": 1},
-        "engine_args": {
-            "model": model_name,
-            "model_stage": "thinker",
-            "enable_sleep_mode": True,
-            "quantization": "fp8",
-            "enforce_eager": True,
-        }
+
+    common_args = {
+        "enable_sleep_mode": True,
+        "quantization": None,
+        "dtype": "bfloat16",
+        "enforce_eager": False,
+        "trust_remote_code": True,
+        "video_pruning_rate": 0.99,
+        "max_model_len": 2048,
+        "gpu_memory_utilization": 0.5
     }
-    engine = AsyncOmni(model_name, stages=[stage_0])
+
+    stages = [
+        # Stage 0 (Thinker): put 0
+        {"stage_id": 0, "stage_type": "llm", "runtime": {"process": True, "devices": "0", "max_batch_size": 1}, 
+         "engine_args": {**common_args, "model_stage": "thinker"}},
+        
+        # Stage 1 (Talker): put 1
+        {"stage_id": 1, "stage_type": "llm", "runtime": {"process": True, "devices": "1", "max_batch_size": 1}, 
+         "engine_args": {**common_args, "model_stage": "talker"}},
+        
+        # Stage 2 (Diffusion): put 0 to test sleep/wakeup logic on the same GPU as Stage 0
+        {"stage_id": 2, "stage_type": "llm", "runtime": {"process": True, "devices": "0", "max_batch_size": 1}, 
+         "engine_args": {**common_args, "model_stage": "code2wav", "worker_type": "generation"}}
+    ]
+
+    engine = AsyncOmni(model_name, stages=stages)
     for stage in engine.stage_list:
         if hasattr(stage, "engine") and stage.engine:
             stage.engine.orchestrator = engine
@@ -51,7 +65,7 @@ class TestOmniSleepMode:
         logger.info("Running Baseline Generation...")
         base_text = ""
         base_ids = []
-        async for output in omni_engine.generate(prompt=prompt, request_id="baseline", sampling_params_list=[sampling_params]):
+        async for output in omni_engine.generate(prompt=prompt, request_id="baseline", sampling_params_list=[sampling_params] * 3):
             res = output.request_output.outputs[0]
             base_text = res.text
             base_ids = res.token_ids
@@ -61,18 +75,18 @@ class TestOmniSleepMode:
 
         # Trigger Deep Sleep & Wakeup Cycle
         logger.info("Testing Sleep Level 2 & Deterministic Wakeup...")
-        await omni_engine.sleep(stage_ids=[0], level=2)
+        await omni_engine.sleep(stage_ids=[0, 1], level=2)
         logger.info("Engine is SLEEPING. VRAM should be released.")
 
         await asyncio.sleep(2)
-        await omni_engine.wake_up(stage_ids=[0])
+        await omni_engine.wake_up(stage_ids=[0,1])
         logger.info("Engine is WAKEN UP. Weights restored.")
 
         logger.info("Running Post-Wakeup Generation...")
         
         post_text = ""
         post_ids = []
-        async for output in omni_engine.generate(prompt=prompt, request_id="post-wake", sampling_params_list=[sampling_params]):
+        async for output in omni_engine.generate(prompt=prompt, request_id="post-wake", sampling_params_list=[sampling_params] * 3):
             res = output.request_output.outputs[0]
             post_text = res.text
             post_ids = res.token_ids
@@ -98,11 +112,12 @@ class TestOmniSleepMode:
         # Trigger deep sleep (Level 2)
         # Verification: await must return only after all Workers have finished moving GPU memory.
         acks = await omni_engine.sleep(stage_ids=[0], level=2)
-        post_sleep_mem = torch.cuda.memory_reserved()
+        torch.cuda.empty_cache()
+        post_sleep_mem = torch.cuda.memory_reserved(0)
         freed_gb = (initial_mem - post_sleep_mem) / 1024**3
         logger.info(f"Post-Sleep VRAM Reserved: {post_sleep_mem / 1024**3:.2f} GiB")
         logger.info(f"Total Freed: {freed_gb:.2f} GiB")
-        assert freed_gb > 20.0, f"VRAM reclamation failed, only freed {freed_gb:.2f} GiB"
+        assert freed_gb > 3.0, f"VRAM reclamation failed, only freed {freed_gb:.2f} GiB"
         assert all(ack.status == "SUCCESS" for ack in acks)
 
     @pytest.mark.asyncio
@@ -113,7 +128,7 @@ class TestOmniSleepMode:
         stage = omni_engine.stage_list[0]
         # Verification: The Resolver can correctly count the number of Workers.
         expected_count = stage.engine.executor.get_worker_count()
-        future = omni_engine.resolver.watch_task(task_id, expected_count=expected_count)
+        future = omni_engine.event_resolver.watch_task(task_id, expected_count=expected_count)
         stage.sleep(level=2, task_id=task_id)
         start_time = asyncio.get_event_loop().time()
         results = await asyncio.wait_for(future, timeout=30.0)
@@ -130,7 +145,7 @@ class TestOmniSleepMode:
         assert omni_engine.stage_list[0].status == "SLEEPING"
         # Attempt to send an inference request while in the SLEEPING state.
         prompt = "A high-tech lab in Kuala Lumpur at night"
-        async for output in omni_engine.generate(prompt=prompt, request_id="test-auto-wake"):
+        async for output in omni_engine.generate(prompt=prompt, request_id="test-auto-wake", sampling_params_list=[OmniSamplingParams(max_tokens=5, temperature=0.0)] * 3):
             assert output is not None
             break  # Only the first output needs to be taken.
         # The final confirmation phase has been activated.

@@ -74,6 +74,12 @@ class OmniModelConfig(ModelConfig):
     )
     omni_kv_config: dict | None = None
 
+    mm_encoder_tp_mode: Any = "weights"
+
+    video_pruning_rate: float = 0.99
+    skip_mm_profiling: bool = True
+    mm_encoder_attn_backend: Any = None
+
     @property
     def registry(self):
         return me_models.OmniModelRegistry
@@ -101,22 +107,35 @@ class OmniModelConfig(ModelConfig):
             return get_hf_text_config(self.hf_config)
 
     def __post_init__(
-        self,
-        # Multimodal config init vars
-        limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
-        enable_mm_embeds: bool | None,
-        media_io_kwargs: dict[str, dict[str, Any]] | None,
-        mm_processor_kwargs: dict[str, Any] | None,
-        mm_processor_cache_gb: float | None,
-        mm_processor_cache_type: MMCacheType | None,
-        mm_shm_cache_max_object_size_mb: int | None,
-        mm_encoder_only: bool | None,
-        mm_encoder_tp_mode: MMEncoderTPMode | None,
-        mm_encoder_attn_backend: AttentionBackendEnum | str | None,
-        interleave_mm_strings: bool | None,
-        skip_mm_profiling: bool | None,
-        video_pruning_rate: float | None,
+        self, *args, **kwargs, 
     ) -> None:
+        def extract_var(idx, key, default=None):
+            if len(args) > idx:
+                return args[idx]
+            return kwargs.get(key, getattr(self, key, default))
+        
+        limit_mm_per_prompt   = extract_var(0, "limit_mm_per_prompt")
+        enable_mm_embeds      = extract_var(1, "enable_mm_embeds")
+        media_io_kwargs       = extract_var(2, "media_io_kwargs")
+        mm_processor_kwargs   = extract_var(3, "mm_processor_kwargs")
+        mm_processor_cache_gb = extract_var(4, "mm_processor_cache_gb")
+        mm_processor_cache_type = extract_var(5, "mm_processor_cache_type")
+        mm_shm_cache_max_object_size_mb = extract_var(6, "mm_shm_cache_max_object_size_mb")
+        mm_encoder_only       = extract_var(7, "mm_encoder_only", False)
+        mm_encoder_tp_mode    = extract_var(8, "mm_encoder_tp_mode", "weights")
+        if mm_encoder_tp_mode not in ["weights", "data"]:
+            mm_encoder_tp_mode = "weights"
+        self.mm_encoder_tp_mode = mm_encoder_tp_mode
+        mm_encoder_attn_backend = extract_var(9, "mm_encoder_attn_backend")
+        interleave_mm_strings = extract_var(10, "interleave_mm_strings", True)
+        skip_mm_profiling     = extract_var(11, "skip_mm_profiling", True)
+        video_pruning_rate    = extract_var(12, "video_pruning_rate", 0.99)
+        if mm_encoder_attn_backend is False:
+            mm_encoder_attn_backend = None
+        self.mm_encoder_attn_backend = mm_encoder_attn_backend
+        self.skip_mm_profiling = bool(skip_mm_profiling)
+        self.video_pruning_rate = float(video_pruning_rate) if video_pruning_rate is not None else 0.99
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model, self.served_model_name)
         self.model = maybe_model_redirect(self.model)
@@ -283,6 +302,11 @@ class OmniModelConfig(ModelConfig):
             mm_config_kwargs = {k: v for k, v in mm_config_kwargs.items() if v is not None}
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
+
+            if not hasattr(self.multimodal_config, "mm_encoder_only"):
+                setattr(self.multimodal_config, "mm_encoder_only", mm_encoder_only)
+            if not hasattr(self.multimodal_config, "video_pruning_rate"):
+                setattr(self.multimodal_config, "video_pruning_rate", video_pruning_rate)
 
         # Multimodal GGUF models must use original repo for mm processing
         if is_gguf(self.tokenizer) and self.is_multimodal_model:
