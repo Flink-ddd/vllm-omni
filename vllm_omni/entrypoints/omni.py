@@ -201,8 +201,13 @@ class OmniBase:
 
         base_engine_args = {"tokenizer": tokenizer} if tokenizer is not None else None
 
+        user_stages = kwargs.get("stages", None)
+
+        if user_stages is not None:
+            self.stage_configs = OmegaConf.create(user_stages)
+            self.config_path = None
         # Load stage configurations from YAML
-        if stage_configs_path is None:
+        elif stage_configs_path is None:
             self.config_path = resolve_model_config_path(model)
             self.stage_configs = load_stage_configs_from_model(model, base_engine_args=base_engine_args)
             if not self.stage_configs:

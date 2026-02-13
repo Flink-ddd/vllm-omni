@@ -247,12 +247,12 @@ class DiffusionWorker:
         """
         try:
             initial_reserved = torch.cuda.memory_reserved()
-            logger.info(f"[Worker {self.rank}] Handshake Received: Task {task.task_id}, Level {task.level}")
+            logger.info(f"[Diffusion Worker {self.rank}] Handshake Received: Task {task.task_id}, Level {task.level}")
 
             if task.level >= 2:
                 if hasattr(self.model_runner, "graph_runners"):
                     self.model_runner.graph_runners.clear()
-                    logger.info(f"[Worker {self.rank}] Task 1: CUDA Graph runners cleared.")
+                    logger.info(f"[Diffusion Worker {self.rank}] CUDA Graph runners cleared.")
 
                 self.sleep(level=task.level)
 
@@ -266,19 +266,18 @@ class DiffusionWorker:
                 metadata={"cuda_graph_cleaned": task.level >= 2}
             )
             self.result_mq.put(ack)
-            logger.info(f"[Worker {self.rank}] Task 2: ACK emitted. Freed {freed / 1024**3:.2f} GiB.")
+            logger.info(f"[Diffusion Worker {self.rank}]: ACK emitted. Freed {freed / 1024**3:.2f} GiB.")
 
         except Exception as e:
-            logger.error(f"[Worker {self.rank}] Task 2 Failed: {e}", exc_info=True)
+            logger.error(f"[Diffusion Worker {self.rank}] Failed: {e}", exc_info=True)
             self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
 
     def handle_wake_task(self, task: OmniWakeTask) -> None:
         """Deterministic wake-up processor"""
         try:
-            logger.info(f"[Worker {self.rank}] Responding to Wake-up Task: {task.task_id}")
+            logger.info(f"[Diffusion Worker {self.rank}] Responding to Wake-up Task: {task.task_id}")
             self.wake_up(tags=task.tags)
             current_omni_platform.synchronize()
-
             # send WARM ACK
             ack = OmniACK(
                 task_id=task.task_id,
@@ -286,7 +285,7 @@ class DiffusionWorker:
                 metadata={"state": "WARM", "rank": self.rank}
             )
             self.result_mq.put(ack)
-            logger.info(f"[Worker {self.rank}] Task 2: Wake-up confirmed.")
+            logger.info(f"[Diffusion Worker {self.rank}] Wake-up confirmed.")
         except Exception as e:
             self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
 
@@ -410,7 +409,18 @@ class WorkerProc:
                     logger.error(f"Error processing RPC: {e}", exc_info=True)
                     if self.result_mq is not None:
                         self.return_result(DiffusionOutput(error=str(e)))
-
+            elif isinstance(msg, dict) and msg.get("type") == "sleep":
+                task_obj = OmniSleepTask(
+                    level=msg.get("level", 2),
+                    task_id=msg.get("task_id", "local")
+                )
+                self.worker.handle_sleep_task(task_obj)
+            elif isinstance(msg, dict) and msg.get("type") == "wake_up":
+                task_obj = OmniWakeTask(
+                    level=msg.get("level", 2),
+                    task_id=msg.get("task_id", "local")
+                )
+                self.worker.handle_wake_task(task_obj)
             elif isinstance(msg, dict) and msg.get("type") == "shutdown":
                 logger.info("Worker %s: Received shutdown message", self.gpu_id)
                 self._running = False

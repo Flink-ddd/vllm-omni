@@ -13,6 +13,14 @@ from vllm_omni.worker.gpu_memory_utils import (
     get_process_gpu_memory,
 )
 
+from vllm_omni.diffusion.data import (
+    DiffusionOutput,
+    OmniDiffusionConfig,
+    OmniACK,
+    OmniSleepTask,
+    OmniWakeTask,
+)
+
 logger = init_logger(__name__)
 
 
@@ -100,3 +108,71 @@ class OmniGPUWorkerBase(GPUWorker):
             )
 
         return int(self.available_kv_cache_memory_bytes)
+
+
+    def sleep(self, level: int = 1) -> bool:
+        "Physical video memory unloading logic"
+        from vllm.device_allocator.cumem import CuMemAllocator
+        from vllm_omni.worker.gpu_memory_utils import get_process_gpu_memory
+        mem_before = get_process_gpu_memory(self.local_rank) or torch.cuda.memory_reserved()
+        allocator = CuMemAllocator.get_instance()
+        offload_tags = ("weights",) if level == 1 else tuple()
+        allocator.sleep(offload_tags=offload_tags)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        mem_after = get_process_gpu_memory(self.local_rank) or torch.cuda.memory_reserved()
+        freed = mem_before - mem_after
+        logger.info(f"[LLM Worker {self.rank}] Sleep mode freed {freed / 1024**3:.2f} GiB.")
+        return True
+
+    def wake_up(self, tags: list[str] | None = None) -> bool:
+        "Physical video memory reloading logic"
+        from vllm.device_allocator.cumem import CuMemAllocator
+        allocator = CuMemAllocator.get_instance()
+        allocator.wake_up(tags)
+        torch.cuda.synchronize()
+        logger.info(f"[LLM Worker {self.rank}] Wake-up complete.")
+        return True
+
+    def handle_sleep_task(self, task: OmniSleepTask) -> OmniACK:
+        "Handle deterministic Sleep command from the main process"
+        try:
+            logger.info(f"[LLM Worker {self.rank}] Received Sleep Handshake: {task.task_id}")
+            mem_before = get_process_gpu_memory(self.local_rank) or torch.cuda.memory_reserved()
+            # Physical memory reclamation (if Level 2, destroy CUDA Graph)
+            if task.level >= 2:
+                if hasattr(self.model_runner, "graph_runners"):
+                    # CUDA Graphs for the LLM stage are stored in model_runner
+                    self.model_runner.graph_runners.clear()
+                    logger.info(f"[LLM Worker {self.rank}] CUDA Graphs cleared.")
+                self.sleep(level=task.level)
+            from vllm_omni.worker.gpu_memory_utils import get_process_gpu_memory
+            mem_after = get_process_gpu_memory(self.local_rank) or torch.cuda.memory_reserved()
+            real_freed = max(0, mem_before - mem_after)
+            ack = OmniACK(
+                task_id=task.task_id,
+                status="SUCCESS",
+                stage_id=getattr(self, "stage_id", 0),
+                rank=self.rank,
+                freed_bytes=real_freed,
+                metadata={"vram_after": mem_after}
+            )
+            if hasattr(self, "result_mq") and self.result_mq:
+                self.result_mq.put(ack)
+            logger.info(f"[LLM Worker {self.rank}] ACK emitted for Task {task.task_id}")
+            return ack
+        except Exception as e:
+            logger.error(f"[LLM Worker {self.rank}] Sleep Task Failed: {e}")
+            if hasattr(self, "result_mq") and self.result_mq:
+                self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
+
+    def handle_wake_task(self, task: OmniWakeTask) -> None:
+        "Handle deterministic Wakeup command from the main process"
+        try:
+            self.wake_up(tags=task.tags)
+            ack = OmniACK(task_id=task.task_id, status="SUCCESS", rank=self.rank)
+            if hasattr(self, "result_mq") and self.result_mq:
+                self.result_mq.put(ack)
+        except Exception as e:
+            if hasattr(self, "result_mq") and self.result_mq:
+                self.result_mq.put(OmniACK(task_id=task.task_id, status="ERROR", error_msg=str(e)))
