@@ -9,13 +9,13 @@ to DiffusionModelRunner.
 """
 
 import gc
+import json
 import multiprocessing as mp
 import os
 from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
-from typing import Any
-import json
 from pathlib import Path
+from typing import Any
 
 import torch
 import zmq
@@ -64,16 +64,18 @@ class DiffusionWorker:
     def predict_resource_usage(od_config: OmniDiffusionConfig) -> dict[str, float]:
         import torch
         from vllm.utils.mem_utils import GiB_bytes
+
         total_params = 0
         try:
             model_path = Path(od_config.model)
             for cfg_name in ["config.json", "llm_config.json", "diffusion_config.json"]:
                 cfg_file = model_path / cfg_name
                 if cfg_file.exists():
-                    with open(cfg_file, 'r') as f:
+                    with open(cfg_file) as f:
                         data = json.load(f)
                         total_params = data.get("num_parameters", 0) or data.get("total_params", 0)
-                        if total_params > 0: break
+                        if total_params > 0:
+                            break
         except Exception:
             pass
         if total_params == 0:
@@ -92,7 +94,7 @@ class DiffusionWorker:
         return {
             "static_gb": round(static_gb, 2),
             "dynamic_gb": round(dynamic_gb, 2),
-            "total_gb": round(static_gb + dynamic_gb, 2)
+            "total_gb": round(static_gb + dynamic_gb, 2),
         }
 
     def __init__(

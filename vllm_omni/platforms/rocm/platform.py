@@ -103,4 +103,3 @@ class RocmOmniPlatform(OmniPlatform, RocmPlatform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).total_memory
-
