@@ -14,6 +14,8 @@ import os
 from collections.abc import Iterable
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any
+import json
+from pathlib import Path
 
 import torch
 import zmq
@@ -57,6 +59,41 @@ class DiffusionWorker:
     All model-related operations (loading, compilation, execution) are
     delegated to DiffusionModelRunner.
     """
+
+    @staticmethod
+    def predict_resource_usage(od_config: OmniDiffusionConfig) -> dict[str, float]:
+        import torch
+        from vllm.utils.mem_utils import GiB_bytes
+        total_params = 0
+        try:
+            model_path = Path(od_config.model)
+            for cfg_name in ["config.json", "llm_config.json", "diffusion_config.json"]:
+                cfg_file = model_path / cfg_name
+                if cfg_file.exists():
+                    with open(cfg_file, 'r') as f:
+                        data = json.load(f)
+                        total_params = data.get("num_parameters", 0) or data.get("total_params", 0)
+                        if total_params > 0: break
+        except Exception:
+            pass
+        if total_params == 0:
+            m_name = str(od_config.model).lower()
+            if "bagel" in m_name:
+                total_params = 13.5e9
+            elif "flux" in m_name:
+                total_params = 12.0e9
+            else:
+                total_params = 10.0e9
+        dtype = getattr(od_config, "dtype", torch.bfloat16)
+        bytes_per_param = 2 if dtype in [torch.bfloat16, torch.float16] else 4
+        static_gb = (total_params * bytes_per_param) / GiB_bytes
+        h, w = getattr(od_config, "height", 1024), getattr(od_config, "width", 1024)
+        dynamic_gb = 2.5 * (h * w / (1024 * 1024))
+        return {
+            "static_gb": round(static_gb, 2),
+            "dynamic_gb": round(dynamic_gb, 2),
+            "total_gb": round(static_gb + dynamic_gb, 2)
+        }
 
     def __init__(
         self,

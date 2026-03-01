@@ -297,6 +297,35 @@ class OmniBase:
 
         return config_path, stage_configs
 
+    def _coordinate_vram_resources(self) -> None:
+        """Coordinate VRAM resource reservations across stages based on their type and configs."""
+        import torch
+        from vllm.utils.mem_utils import GiB_bytes
+        total_reserved_gb = 0.0
+        for cfg in self.stage_configs:
+            s_type = getattr(cfg, "stage_type", None)
+            if s_type == "diffusion":
+                # Currently only Diffusion implements the predict_resource_usage interface.
+                from vllm_omni.diffusion.worker.diffusion_worker import DiffusionWorker
+                prediction = DiffusionWorker.predict_resource_usage(cfg.engine_args)
+                total_reserved_gb += prediction["total_gb"]
+                logger.info(f"[Coordinator] Stage-{cfg.stage_id} ({s_type.capitalize()}) "
+                            f"predicted budget: {prediction['total_gb']:.2f} GiB")
+            # Extended generation and other logic
+        if not torch.cuda.is_available():
+            return
+        physical_vram_gb = torch.cuda.get_device_properties(0).total_memory / GiB_bytes
+        for cfg in self.stage_configs:
+            if getattr(cfg, "stage_type", None) == "llm":
+                original_util = cfg.engine_args.get("gpu_memory_utilization", 0.9)
+                reserved_util_ratio = total_reserved_gb / physical_vram_gb
+                # (Physical_Used + Logical_KV_Buffer) / Total_VRAM
+                adjusted_util = min(0.95, original_util + reserved_util_ratio)
+                cfg.engine_args["gpu_memory_utilization"] = round(adjusted_util, 3)
+                logger.info(f"[Coordinator] LLM Stage-{cfg.stage_id} dynamic boost: "
+                            f"{original_util} -> {cfg.engine_args['gpu_memory_utilization']} "
+                            f"(Compensating {reserved_util_ratio:.2f} ratio for cross-modal isolation)")
+
     def _initialize_stages(self, model: str, kwargs: dict[str, Any]) -> None:
         """Initialize stage list management."""
         stage_init_timeout = kwargs.get("stage_init_timeout", 20)
@@ -315,6 +344,8 @@ class OmniBase:
 
         # Resolve stage configs shared by orchestrator/headless paths.
         self.config_path, self.stage_configs = self._resolve_stage_configs(model, kwargs)
+
+        self._coordinate_vram_resources()
 
         # Initialize connectors
         self.omni_transfer_config, self.connectors = initialize_orchestrator_connectors(
