@@ -298,7 +298,11 @@ class OmniBase:
         return config_path, stage_configs
 
     def _coordinate_vram_resources(self) -> None:
-        """Coordinate VRAM resource reservations across stages based on their type and configs."""
+        """
+        Coordinate VRAM resource reservations across stages based on their type and configs.
+        Note: Current implementation supports per-device isolation. Advanced multi-GPU
+        scenarios like TP or PP are planned as sleep mode ack Test Scenario.
+        """
         import torch
         from vllm.utils.mem_utils import GiB_bytes
 
@@ -325,6 +329,8 @@ class OmniBase:
                     f"on devices {devices} predicted budget: {prediction['total_gb']:.2f} GiB"
                 )
         if not torch.cuda.is_available():
+            # TODO: Add support for other accelerators (NPU/XPU)
+            # as their specific memory management APIs are integrated.
             return
         for cfg in active_configs:
             if getattr(cfg, "stage_type", None) == "llm":
@@ -367,6 +373,7 @@ class OmniBase:
         # Resolve stage configs shared by orchestrator/headless paths.
         self.config_path, self.stage_configs = self._resolve_stage_configs(model, kwargs)
 
+        # This ensures all engines receive the corrected gpu_memory_utilization through engine_args.
         self._coordinate_vram_resources()
 
         # Initialize connectors

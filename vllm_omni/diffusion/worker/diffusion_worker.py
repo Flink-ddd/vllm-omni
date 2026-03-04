@@ -46,6 +46,13 @@ from vllm_omni.worker.gpu_memory_utils import get_process_gpu_memory
 
 logger = init_logger(__name__)
 
+MODEL_PARAM_COUNTS = {
+    "bagel": 13.5e9,  # BAGEL-7B-MoT
+    "flux": 12.0e9,  # FLUX.1-dev
+    "default": 10.0e9,
+}
+ACTIVATION_MEMORY_MULTIPLIER = 2.5
+
 
 class DiffusionWorker:
     """
@@ -62,7 +69,6 @@ class DiffusionWorker:
 
     @staticmethod
     def predict_resource_usage(od_config: OmniDiffusionConfig) -> dict[str, float]:
-        import torch
         from vllm.utils.mem_utils import GiB_bytes
 
         total_params = 0
@@ -71,26 +77,31 @@ class DiffusionWorker:
             for cfg_name in ["config.json", "llm_config.json", "diffusion_config.json"]:
                 cfg_file = model_path / cfg_name
                 if cfg_file.exists():
-                    with open(cfg_file) as f:
-                        data = json.load(f)
-                        total_params = data.get("num_parameters", 0) or data.get("total_params", 0)
-                        if total_params > 0:
-                            break
-        except Exception:
-            pass
+                    try:
+                        with open(cfg_file) as f:
+                            data = json.load(f)
+                            total_params = data.get("num_parameters", 0) or data.get("total_params", 0)
+                            if total_params > 0:
+                                break
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Invalid JSON in {cfg_file}: {e}")
+                    except Exception as e:
+                        logger.debug(f"Error reading {cfg_file}: {e}")
+        except Exception as e:
+            logger.debug(f"Unexpected error during metadata extraction: {e}")
         if total_params == 0:
             m_name = str(od_config.model).lower()
             if "bagel" in m_name:
-                total_params = 13.5e9
+                total_params = MODEL_PARAM_COUNTS["bagel"]
             elif "flux" in m_name:
-                total_params = 12.0e9
+                total_params = MODEL_PARAM_COUNTS["flux"]
             else:
-                total_params = 10.0e9
+                total_params = MODEL_PARAM_COUNTS["default"]
         dtype = getattr(od_config, "dtype", torch.bfloat16)
         bytes_per_param = 2 if dtype in [torch.bfloat16, torch.float16] else 4
         static_gb = (total_params * bytes_per_param) / GiB_bytes
         h, w = getattr(od_config, "height", 1024), getattr(od_config, "width", 1024)
-        dynamic_gb = 2.5 * (h * w / (1024 * 1024))
+        dynamic_gb = ACTIVATION_MEMORY_MULTIPLIER * (h * w / (1024 * 1024))
         return {
             "static_gb": round(static_gb, 2),
             "dynamic_gb": round(dynamic_gb, 2),
