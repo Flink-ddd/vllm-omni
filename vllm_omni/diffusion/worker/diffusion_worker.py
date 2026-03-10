@@ -99,7 +99,20 @@ class DiffusionWorker:
             else:
                 total_params = MODEL_PARAM_COUNTS["default"]
         dtype = getattr(od_config, "dtype", torch.bfloat16)
-        bytes_per_param = 2 if dtype in [torch.bfloat16, torch.float16] else 4
+        dtype_str = str(dtype).lower()
+
+        # Calculate the number of bytes per parameter
+        # based on different levels of precision.
+        if "int4" in dtype_str:
+            bytes_per_param = 0.5
+        elif any(kw in dtype_str for kw in ["float8", "int8"]):
+            bytes_per_param = 1
+        elif any(kw in dtype_str for kw in ["float16", "bfloat16", "half"]):
+            bytes_per_param = 2
+        elif any(kw in dtype_str for kw in ["float32", "int32"]):
+            bytes_per_param = 4
+        else:
+            bytes_per_param = 4
         static_gb = (total_params * bytes_per_param) / GiB_bytes
         h, w = getattr(od_config, "height", 1024), getattr(od_config, "width", 1024)
         dynamic_gb = ACTIVATION_MEMORY_MULTIPLIER * (h * w / (1024 * 1024))
