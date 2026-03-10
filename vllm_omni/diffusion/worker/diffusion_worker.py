@@ -74,7 +74,7 @@ class DiffusionWorker:
 
         total_params = 0
         try:
-            model_path = Path(od_config.model)
+            model_path = Path(getattr(od_config, "model", ""))
             for cfg_name in ["config.json", "llm_config.json", "diffusion_config.json"]:
                 cfg_file = model_path / cfg_name
                 if cfg_file.exists():
@@ -91,7 +91,7 @@ class DiffusionWorker:
         except Exception as e:
             logger.debug(f"Unexpected error during metadata extraction: {e}")
         if total_params == 0:
-            m_name = str(od_config.model).lower()
+            m_name = str(getattr(od_config, "model", "")).lower()
             if "bagel" in m_name:
                 total_params = MODEL_PARAM_COUNTS["bagel"]
             elif "flux" in m_name:
