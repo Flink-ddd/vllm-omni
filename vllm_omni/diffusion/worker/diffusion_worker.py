@@ -52,6 +52,9 @@ MODEL_PARAM_COUNTS = {
     "flux": 12.0e9,  # FLUX.1-dev
     "default": 10.0e9,
 }
+
+# 2.5 GiB is the empirical peak activation footprint (intermediate tensors +
+# attention workspace) for models like Bagel-7B/Flux at 1024x1024 resolution.
 ACTIVATION_MEMORY_MULTIPLIER = 2.5
 
 
@@ -73,34 +76,34 @@ class DiffusionWorker:
         from vllm.utils.mem_utils import GiB_bytes
 
         total_params = 0
+        estimate_source = "fallback"
         try:
             model_path = Path(getattr(od_config, "model", ""))
-            for cfg_name in ["config.json", "llm_config.json", "diffusion_config.json"]:
-                cfg_file = model_path / cfg_name
-                if cfg_file.exists():
-                    try:
-                        with open(cfg_file) as f:
-                            data = json.load(f)
-                            total_params = data.get("num_parameters", 0) or data.get("total_params", 0)
-                            if total_params > 0:
-                                break
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in {cfg_file}: {e}")
-                    except Exception as e:
-                        logger.debug(f"Error reading {cfg_file}: {e}")
+            index_file = model_path / "model.safetensors.index.json"
+            if index_file.exists():
+                with open(index_file) as f:
+                    data = json.load(f)
+                    # metadata.total_size
+                    total_params = int(data.get("metadata", {}).get("total_size", 0))
+                    if total_params > 0:
+                        estimate_source = "safetensors index"
         except Exception as e:
-            logger.debug(f"Unexpected error during metadata extraction: {e}")
+            logger.debug(f"Failed to parse safetensors metadata: {e}")
         if total_params == 0:
             m_name = str(getattr(od_config, "model", "")).lower()
             if "bagel" in m_name:
                 total_params = MODEL_PARAM_COUNTS["bagel"]
+                estimate_source = "bagel"
             elif "flux" in m_name:
                 total_params = MODEL_PARAM_COUNTS["flux"]
+                estimate_source = "flux"
             else:
                 total_params = MODEL_PARAM_COUNTS["default"]
+                estimate_source = "default"
+        logger.info(f"VRAM Quota: Estimated {total_params / 1e9:.2f}B params using {estimate_source} logic")
+
         dtype = getattr(od_config, "dtype", torch.bfloat16)
         dtype_str = str(dtype).lower()
-
         # Calculate the number of bytes per parameter
         # based on different levels of precision.
         if "int4" in dtype_str:

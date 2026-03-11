@@ -113,9 +113,5 @@ class CudaOmniPlatform(OmniPlatform, CudaPlatformBase):
         return free
 
     @classmethod
-    def get_device_total_memory(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).total_memory
-
-    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return torch.cuda.get_device_name(device_id)
