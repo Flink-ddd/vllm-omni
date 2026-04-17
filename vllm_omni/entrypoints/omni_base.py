@@ -85,7 +85,7 @@ class OmniBase(PDDisaggregationMixin):
         if "log_requests" in kwargs:
             raise TypeError("`log_requests` has been removed in Omni/AsyncOmni. Use `log_stats`.")
         model = omni_snapshot_download(model)
-        self._name = self.__class__.__name__
+        self.__dict__["_name"] = self.__class__.__name__
         self.model = model
         self.log_stats = log_stats
         self.async_chunk = async_chunk

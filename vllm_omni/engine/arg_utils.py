@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.logger import init_logger
 
 from vllm_omni.config import OmniModelConfig
@@ -144,6 +144,24 @@ class OmniEngineArgs(EngineArgs):
     quantization_config: Any | None = None
     worker_type: str | None = None
     task_type: str | None = None
+    worker_cls: str = None
+    enable_sleep_mode: bool = False
+    omni: bool = False
+
+    @classmethod
+    def _add_omni_specific_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        try:
+            parser.add_argument("--omni", action="store_true", default=False, help="Enable Omni engine features.")
+        except argparse.ArgumentError:
+            pass
+        try:
+            parser.add_argument(
+                "--enable-sleep-mode", action="store_true", default=False, help="Enable GPU memory pool for sleep mode."
+            )
+        except argparse.ArgumentError:
+            pass
+        return parser
+
     omni_master_address: str | None = None
     omni_master_port: int | None = None
     stage_configs_path: str | None = None
@@ -152,6 +170,11 @@ class OmniEngineArgs(EngineArgs):
     custom_pipeline_args: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
+        if self.worker_cls is None or self.worker_cls == "vllm.v1.worker.gpu_worker.Worker":
+            if self.model_stage in ["thinker", "talker"]:
+                self.worker_cls = "vllm_omni.worker.gpu_ar_worker.GPUARWorker"
+            elif self.model_stage == "generation":
+                self.worker_cls = "vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker"
         load_omni_general_plugins()
         super().__post_init__()
 
@@ -295,6 +318,15 @@ class OmniEngineArgs(EngineArgs):
             task_type=self.task_type,
         )
         return omni_config
+
+
+@dataclass
+class OmniAsyncEngineArgs(AsyncEngineArgs, OmniEngineArgs):
+    @classmethod
+    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        parser = AsyncEngineArgs.add_cli_args(parser)
+        parser = OmniEngineArgs._add_omni_specific_args(parser)
+        return parser
 
     @property
     def output_modality(self) -> OutputModality:
