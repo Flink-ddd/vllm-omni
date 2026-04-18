@@ -649,13 +649,14 @@ def assert_result(result: dict[str, Any], params: dict[str, Any]) -> None:
     num_prompts = params.get("num-prompts", 10)
     completed = result.get("completed_requests", result.get("completed", 0))
     assert completed == num_prompts, f"Expected {num_prompts} completed requests, got {completed}"
+
     for metric, threshold in params.get("baseline", {}).items():
         current = result.get(metric)
         assert current is not None, f"Metric '{metric}' not found in result: {list(result.keys())}"
         if "throughput" in metric:
-            assert current >= (threshold), f"{metric}: {current:.4f} < baseline {threshold}"
+            assert current >= threshold, f"{metric}: {current:.4f} < baseline {threshold}"
         else:
-            assert current <= (threshold), f"{metric}: {current:.4f} > baseline {threshold}"
+            assert current <= threshold, f"{metric}: {current:.4f} > baseline {threshold}"
 
 
 # ---------------------------------------------------------------------------
