@@ -1985,7 +1985,7 @@ def _estimate_voice_gender_from_audio(audio_bytes: bytes) -> str:
 
         # Debias: wav2vec2 gender heads often call TTS / band-limited male speech "female".
         # Low median F0 (~speech male range) + female label -> trust pitch when score is not overwhelming.
-        if gender == "female" and median_f0 is not None and median_f0 < 197.0 and conf < 0.88:
+        if gender == "female" and median_f0 is not None and median_f0 < 165.0 and conf < 0.88:
             print(f"gender pitch assist: reclassifying female->male (median_f0={median_f0:.1f} Hz, conf={conf:.3f})")
             gender = "male"
         elif gender == "male" and median_f0 is not None and median_f0 > 230.0 and conf < 0.88:

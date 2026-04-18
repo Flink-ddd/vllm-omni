@@ -485,17 +485,7 @@ def test_speaker_001(omni_server, openai_client) -> None:
         "key_words": {"text": ["beijing"]},
     }
 
-    # Retry only when assert_omni_response fails on preset voice gender (see tests/conftest.py).
-    _gender_assert_substr = "estimated gender"
-    _max_retries = 3
-    for attempt in range(_max_retries):
-        try:
-            openai_client.send_omni_request(request_config)
-            break
-        except AssertionError as e:
-            if _gender_assert_substr not in str(e) or attempt == _max_retries - 1:
-                raise
-            print(f"Gender assertion failed for Chelsie, retrying {attempt + 2}/{_max_retries}: {e!r}")
+    openai_client.send_omni_request(request_config)
 
 
 @pytest.mark.advanced_model
@@ -560,16 +550,7 @@ def test_speaker_003(omni_server, openai_client) -> None:
         "key_words": {"text": ["beijing"]},
     }
 
-    _gender_assert_substr = "estimated gender"
-    _max_retries = 3
-    for attempt in range(_max_retries):
-        try:
-            openai_client.send_omni_request(request_config)
-            break
-        except AssertionError as e:
-            if _gender_assert_substr not in str(e) or attempt == _max_retries - 1:
-                raise
-            print(f"Gender assertion failed for CHELSIE, retrying {attempt + 2}/{_max_retries}: {e!r}")
+    openai_client.send_omni_request(request_config)
 
 
 @pytest.mark.advanced_model

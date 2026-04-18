@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 
 from vllm_omni.config import OmniModelConfig
 from vllm_omni.engine.output_modality import OutputModality
+from vllm_omni.platforms import current_omni_platform
 from vllm_omni.plugins import load_omni_general_plugins
 
 logger = init_logger(__name__)
@@ -170,11 +171,11 @@ class OmniEngineArgs(EngineArgs):
     custom_pipeline_args: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.worker_cls is None or self.worker_cls == "vllm.v1.worker.gpu_worker.Worker":
-            if self.model_stage in ["thinker", "talker"]:
-                self.worker_cls = "vllm_omni.worker.gpu_ar_worker.GPUARWorker"
-            elif self.model_stage == "generation":
-                self.worker_cls = "vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker"
+        if self.worker_cls is None:
+            if self.worker_type == "ar":
+                self.worker_cls = current_omni_platform.get_omni_ar_worker_cls()
+            elif self.worker_type == "generation":
+                self.worker_cls = current_omni_platform.get_omni_generation_worker_cls()
         load_omni_general_plugins()
         super().__post_init__()
 
