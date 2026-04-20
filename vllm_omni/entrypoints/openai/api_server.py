@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import base64
+import dataclasses
 import io
 import json
 import multiprocessing
@@ -2569,21 +2570,12 @@ class OmniWakeupRequest(BaseModel):
 async def omni_sleep(request: OmniSleepRequest, raw_request: Request):
     engine_client = raw_request.app.state.engine_client
     sleeping_set = raw_request.app.state.sleeping_stages
-    already_sleeping = [sid for sid in request.stage_ids if sid in sleeping_set]
-    if already_sleeping:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "status": "FAILED",
-                "reason": f"Stages {already_sleeping} are already sleeping. Do not double sleep!",
-            },
-        )
     if not hasattr(engine_client, "sleep"):
         raise HTTPException(status_code=501, detail="Engine does not support sleep")
     acks = await engine_client.sleep(stage_ids=request.stage_ids, level=request.level)
     for sid in request.stage_ids:
         sleeping_set.add(sid)
-    return {"status": "SUCCESS", "acks": acks}
+    return {"status": "SUCCESS", "acks": [dataclasses.asdict(a) if dataclasses.is_dataclass(a) else a for a in acks]}
 
 
 @router.post("/v1/omni/wakeup")
@@ -2598,7 +2590,7 @@ async def omni_wakeup(request: OmniWakeupRequest, raw_request: Request):
     for sid in request.stage_ids:
         if sid in sleeping_set:
             sleeping_set.remove(sid)
-    return {"status": "SUCCESS", "acks": acks}
+    return {"status": "SUCCESS", "acks": [dataclasses.asdict(a) if dataclasses.is_dataclass(a) else a for a in acks]}
 
 
 if __name__ == "__main__":
