@@ -338,11 +338,20 @@ class _LazyPipelineRegistry:
     def values(self):
         # Iterating values forces load of every lazy pipeline.
         for key in self.keys():
-            yield self[key]
+            try:
+                yield self[key]
+            except KeyError:
+                # If a model fails to load due to missing dependencies,
+                # log the warning and skip it, without blocking the overall startup.
+                logger.warning(f"Skipping pipeline {key!r} because it failed to load.")
+                continue
 
     def items(self):
         for key in self.keys():
-            yield key, self[key]
+            try:
+                yield key, self[key]
+            except KeyError:
+                continue
 
     def __iter__(self):
         return iter(self.keys())
