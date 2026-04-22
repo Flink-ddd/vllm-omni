@@ -335,23 +335,22 @@ class _LazyPipelineRegistry:
     def keys(self) -> set[str]:
         return set(self._get_lazy_map().keys()) | set(self._loaded.keys())
 
+    def _safe_get(self, key: str) -> PipelineConfig | None:
+        try:
+            return self[key]
+        except KeyError:
+            logger.warning("Skipping pipeline %r because it failed to load.", key)
+        return None
+
     def values(self):
-        # Iterating values forces load of every lazy pipeline.
         for key in self.keys():
-            try:
-                yield self[key]
-            except KeyError:
-                # If a model fails to load due to missing dependencies,
-                # log the warning and skip it, without blocking the overall startup.
-                logger.warning(f"Skipping pipeline {key!r} because it failed to load.")
-                continue
+            if (p := self._safe_get(key)) is not None:
+                yield p
 
     def items(self):
         for key in self.keys():
-            try:
-                yield key, self[key]
-            except KeyError:
-                continue
+            if (p := self._safe_get(key)) is not None:
+                yield key, p
 
     def __iter__(self):
         return iter(self.keys())

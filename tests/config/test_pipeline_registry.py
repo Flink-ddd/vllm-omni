@@ -67,6 +67,22 @@ class TestLazyLoading:
         assert "qwen2_5_omni" in keys
         assert "qwen3_omni_moe" in keys
 
+    def test_iteration_resilience(self, monkeypatch):
+        # Synthetic failure to verify iteration robustness against load errors.
+        monkeypatch.setattr(
+            _PIPELINE_REGISTRY,
+            "_lazy_map",
+            {
+                "healthy": ("vllm_omni.model_executor.models.qwen2_5_omni.pipeline", "QWEN2_5_OMNI_PIPELINE"),
+                "broken": ("vllm_omni.non_existent_module", "SomeConfig"),
+            },
+        )
+        # Assert that list(_PIPELINE_REGISTRY.values()) and dict(_PIPELINE_REGISTRY.items())
+        # both yield only healthy entries.
+        healthy_instance = _PIPELINE_REGISTRY["healthy"]
+        assert list(_PIPELINE_REGISTRY.values()) == [healthy_instance]
+        assert dict(_PIPELINE_REGISTRY.items()) == {"healthy": healthy_instance}
+
 
 class TestDynamicRegistration:
     """``register_pipeline()`` still works for plugins and tests."""
