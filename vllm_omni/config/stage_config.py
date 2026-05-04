@@ -297,7 +297,9 @@ class _LazyPipelineRegistry:
                     model_type,
                 )
                 return None
-            pipeline.validate()
+            errors = pipeline.validate()
+            if errors:
+                logger.warning("Pipeline %s has issues: %s", pipeline.model_type, errors)
             self._loaded[model_type] = pipeline
             return pipeline
         except Exception:
@@ -356,6 +358,7 @@ class _LazyPipelineRegistry:
         return None
 
     def values(self):
+        # Iterating forces a lazy import for each pipeline; failures are logged and skipped.
         for key in self.keys():
             if (p := self._safe_get(key)) is not None:
                 yield p
