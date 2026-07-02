@@ -142,6 +142,7 @@ class AsyncOmni(EngineClient, OmniBase):
         self._pause_cond: asyncio.Condition = asyncio.Condition()
         self._paused: bool = False
         self._sleeping_tags: set[str] = set()
+        self._level2_sleeping: bool = False
         self.final_output_task: asyncio.Task | None = None
         self.event_resolver = AsyncEventResolver(orchestrator=self)
         self.config_path = self.engine.config_path
@@ -929,12 +930,20 @@ class AsyncOmni(EngineClient, OmniBase):
                 if ack is not None:
                     await self.event_resolver.resolve(ack)
                     final_acks.append(ack)
-        self._is_sleeping = True
         self._sleeping_tags.update(["weights", "kv_cache"])
+        if level == 2:
+            self._level2_sleeping = True
         return final_acks
 
     async def wake_up(self, stage_ids: list[int] | None = None, tags: list[str] | None = None) -> list[OmniACK]:
         self._final_output_handler()
+
+        if self._level2_sleeping:
+            raise NotImplementedError(
+                "wake_up() after sleep(level=2) is not supported: weights were "
+                "discarded from GPU and cannot be restored without reloading from "
+                "disk. Use sleep(level=1) instead."
+            )
 
         if tags is None:
             requested_tags = list(self._sleeping_tags)
@@ -970,6 +979,10 @@ class AsyncOmni(EngineClient, OmniBase):
         await asyncio.sleep(0.1)
         for t in requested_tags:
             self._sleeping_tags.discard(t)
+        # Only clear the level-2 flag once all tags are warm, in case partial
+        # wake support (e.g. tags=["kv_cache"] only) is added in the future.
+        if not self._sleeping_tags:
+            self._level2_sleeping = False
         logger.info(f"[{self._name}] All {len(final_acks)}/{total_workers} workers reported WARM for task {task_id}.")
         return final_acks
 
@@ -979,7 +992,7 @@ class AsyncOmni(EngineClient, OmniBase):
         TODO(AsyncOmni): query the orchestrator once all stage backends expose
         a real sleeping-state RPC. For now we track the requested state locally.
         """
-        return self._is_sleeping
+        return bool(self._sleeping_tags)
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into all stages.
