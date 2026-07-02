@@ -940,9 +940,10 @@ class AsyncOmni(EngineClient, OmniBase):
 
         if self._level2_sleeping:
             raise NotImplementedError(
-                "wake_up() after sleep(level=2) is not supported: weights were "
-                "discarded from GPU and cannot be restored without reloading from "
-                "disk. Use sleep(level=1) instead."
+                "wake_up() after sleep(level=2) is not yet implemented: weights were "
+                "discarded from GPU and reloading from disk is not yet supported. "
+                "Use sleep(level=1) instead, which offloads weights to CPU RAM "
+                "and supports fast DMA restore."
             )
 
         if tags is None:
