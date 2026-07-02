@@ -141,7 +141,7 @@ class AsyncOmni(EngineClient, OmniBase):
         OmniBase.__init__(self, model=model, **kwargs)
         self._pause_cond: asyncio.Condition = asyncio.Condition()
         self._paused: bool = False
-        self._is_sleeping: bool = False
+        self._sleeping_tags: set[str] = set()
         self.final_output_task: asyncio.Task | None = None
         self.event_resolver = AsyncEventResolver(orchestrator=self)
         self.config_path = self.engine.config_path
@@ -305,6 +305,13 @@ class AsyncOmni(EngineClient, OmniBase):
             await self._pause_cond.wait_for(lambda: not self._paused)
 
         logger.debug(f"[AsyncOmni] generate() called for request {external_request_id}")
+
+        if self._sleeping_tags:
+            raise RuntimeError(
+                f"Generation rejected: Engine is partially or fully asleep. "
+                f"Currently sleeping tags: {list(self._sleeping_tags)}. "
+                f"Please perform a full wake_up before generating."
+            )
 
         # Reject diffusion list-prompt early with a clear API error.
         if isinstance(prompt, list) and any(
@@ -923,10 +930,20 @@ class AsyncOmni(EngineClient, OmniBase):
                     await self.event_resolver.resolve(ack)
                     final_acks.append(ack)
         self._is_sleeping = True
+        self._sleeping_tags.update(["weights", "kv_cache"])
         return final_acks
 
     async def wake_up(self, stage_ids: list[int] | None = None, tags: list[str] | None = None) -> list[OmniACK]:
         self._final_output_handler()
+
+        if tags is None:
+            requested_tags = list(self._sleeping_tags)
+        else:
+            requested_tags = [t for t in tags if t in self._sleeping_tags]
+        if not requested_tags:
+            logger.info(f"[{self._name}] Requested tags {tags} are already warm. Skipping wake_up.")
+            return []
+
         if stage_ids is None:
             stage_ids = list(range(len(self.engine.stage_clients)))
         total_workers = 0
@@ -940,7 +957,7 @@ class AsyncOmni(EngineClient, OmniBase):
         task_id = str(uuid.uuid4())
         self.event_resolver.watch_task(task_id, expected_count=total_workers)
         logger.info(f"[{self._name}] Wake-up initiated (Task: {task_id}). Awaiting {total_workers} ACKs...")
-        task = OmniWakeTask(tags=tags, task_id=task_id)
+        task = OmniWakeTask(tags=requested_tags, task_id=task_id)
         rpc_results = await self.collective_rpc(method="handle_wake_task", args=(task,), stage_ids=stage_ids)
         final_acks = []
         for stage_res in rpc_results:
@@ -951,7 +968,8 @@ class AsyncOmni(EngineClient, OmniBase):
                     final_acks.append(ack)
         current_omni_platform.synchronize()
         await asyncio.sleep(0.1)
-        self._is_sleeping = False
+        for t in requested_tags:
+            self._sleeping_tags.discard(t)
         logger.info(f"[{self._name}] All {len(final_acks)}/{total_workers} workers reported WARM for task {task_id}.")
         return final_acks
 
