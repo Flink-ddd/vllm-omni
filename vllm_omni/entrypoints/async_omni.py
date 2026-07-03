@@ -26,7 +26,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils import random_uuid
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from vllm_omni.diffusion.data import OmniACK, OmniSleepTask, OmniWakeTask
+from vllm_omni.diffusion.data import CuMemTag, OmniACK, OmniSleepTask, OmniWakeTask
 from vllm_omni.engine.messages import ErrorMessage, OutputMessage
 from vllm_omni.entrypoints.client_request_state import ClientRequestState
 from vllm_omni.entrypoints.omni_base import (
@@ -307,10 +307,11 @@ class AsyncOmni(EngineClient, OmniBase):
 
         logger.debug(f"[AsyncOmni] generate() called for request {external_request_id}")
 
-        if self._sleeping_tags:
+        _sleeping_tags = getattr(self, "_sleeping_tags", None)
+        if _sleeping_tags:
             raise RuntimeError(
                 f"Generation rejected: Engine is partially or fully asleep. "
-                f"Currently sleeping tags: {list(self._sleeping_tags)}. "
+                f"Currently sleeping tags: {list(_sleeping_tags)}. "
                 f"Please perform a full wake_up before generating."
             )
 
@@ -930,7 +931,9 @@ class AsyncOmni(EngineClient, OmniBase):
                 if ack is not None:
                     await self.event_resolver.resolve(ack)
                     final_acks.append(ack)
-        self._sleeping_tags.update(["weights", "kv_cache"])
+        if not hasattr(self, "_sleeping_tags"):
+            self._sleeping_tags = set()
+        self._sleeping_tags.update([CuMemTag.WEIGHTS, CuMemTag.KV_CACHE])
         if level == 2:
             self._level2_sleeping = True
         return final_acks
@@ -938,18 +941,18 @@ class AsyncOmni(EngineClient, OmniBase):
     async def wake_up(self, stage_ids: list[int] | None = None, tags: list[str] | None = None) -> list[OmniACK]:
         self._final_output_handler()
 
-        if self._level2_sleeping:
+        if getattr(self, "_level2_sleeping", False):
             raise NotImplementedError(
                 "wake_up() after sleep(level=2) is not yet implemented: weights were "
                 "discarded from GPU and reloading from disk is not yet supported. "
                 "Use sleep(level=1) instead, which offloads weights to CPU RAM "
                 "and supports fast DMA restore."
             )
-
+        _current_tags = getattr(self, "_sleeping_tags", set())
         if tags is None:
-            requested_tags = list(self._sleeping_tags)
+            requested_tags = list(_current_tags)
         else:
-            requested_tags = [t for t in tags if t in self._sleeping_tags]
+            requested_tags = [t for t in tags if t in _current_tags]
         if not requested_tags:
             logger.info(f"[{self._name}] Requested tags {tags} are already warm. Skipping wake_up.")
             return []
@@ -978,11 +981,13 @@ class AsyncOmni(EngineClient, OmniBase):
                     final_acks.append(ack)
         current_omni_platform.synchronize()
         await asyncio.sleep(0.1)
+
         for t in requested_tags:
-            self._sleeping_tags.discard(t)
+            if hasattr(self, "_sleeping_tags"):
+                self._sleeping_tags.discard(t)
         # Only clear the level-2 flag once all tags are warm, in case partial
         # wake support (e.g. tags=["kv_cache"] only) is added in the future.
-        if not self._sleeping_tags:
+        if not getattr(self, "_sleeping_tags", None):
             self._level2_sleeping = False
         logger.info(f"[{self._name}] All {len(final_acks)}/{total_workers} workers reported WARM for task {task_id}.")
         return final_acks
@@ -993,7 +998,7 @@ class AsyncOmni(EngineClient, OmniBase):
         TODO(AsyncOmni): query the orchestrator once all stage backends expose
         a real sleeping-state RPC. For now we track the requested state locally.
         """
-        return bool(self._sleeping_tags)
+        return bool(getattr(self, "_sleeping_tags", None))
 
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into all stages.
