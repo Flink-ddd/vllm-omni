@@ -933,7 +933,7 @@ class AsyncOmni(EngineClient, OmniBase):
                     final_acks.append(ack)
         if not hasattr(self, "_sleeping_tags"):
             self._sleeping_tags = set()
-        self._sleeping_tags.update([CuMemTag.WEIGHTS, CuMemTag.KV_CACHE])
+        self._sleeping_tags.update([CuMemTag.WEIGHTS.value, CuMemTag.KV_CACHE.value])
         if level == 2:
             self._level2_sleeping = True
         return final_acks
